@@ -1,0 +1,316 @@
+tosca_definitions_version: yorc_tosca_simple_yaml_1_0
+
+metadata:
+  template_name: org.lexis.common.dynamic-orchestration-types
+  template_version: 1.0.0
+  template_author: lexis
+
+description: Dynamic orchestration types
+
+imports:
+  - org.lexis.common.heappe-types:1.0.6
+  - org.lexis.common.ddi-types:1.0.0
+
+data_types:
+  org.lexis.common.dynamic.orchestration.types.CloudRequirement:
+    derived_from: tosca.datatypes.Root
+    description: Requirement for a compute instance to allocate on Cloud
+    properties:
+      num_cpus:
+        type: string
+        description: Number of (actual or virtual) CPUs associated with the Compute node.
+        required: false
+      mem_size:
+        type: scalar-unit.size
+        description: Size of memory available to applications running on the Compute node (default unit is MB).
+        required: false
+      disk_size:
+        type: scalar-unit.size
+        description: Size of the local disk available to applications running on the Compute node (default unit is MB).
+        required: false
+      os_type:
+        type: string
+        description: >
+          The Operating System (OS) type.
+          Examples of valid values include:
+          linux, aix, mac, windows, etc.
+        required: false
+      os_distribution:
+        type: string
+        description: >
+          The Operating System (OS) distribution.
+          Examples of valid values for an “type” of “Linux” would include:  debian, fedora, rhel and ubuntu.
+        required: false
+      os_version:
+        type: version
+        description: The Operating System version.
+        required: false
+      optional:
+        type: boolean
+        description: Is this resource optional
+        default: false
+        required: false
+  org.lexis.common.dynamic.orchestration.types.HPCRequirement:
+    derived_from: org.lexis.common.heappe.types.JobSpecification
+    description: Requirement for a job to create on HPC
+    properties:
+      optional:
+        type: boolean
+        description: Is this resource optional
+        default: false
+        required: false
+  org.lexis.common.dynamic.orchestration.types.DatasetRequirement:
+    derived_from: tosca.datatypes.Root
+    description: Requirement from an input dataset to transfer
+    properties:
+      locations:
+        type: list
+        entry_schema:
+          type: string
+        description: Locations where the dataset is available
+        required: true
+      number_of_files:
+        type: integer
+        description: Number of files in the dataset
+        required: true
+      number_of_small_files:
+        type: integer
+        description: Number of small files in the dataset (<=32MB)
+        required: true
+      size:
+        type: integer
+        description: Size of the dataset in bytes.
+        required: true
+  org.lexis.common.dynamic.orchestration.types.CloudLocation:
+    derived_from: tosca.datatypes.Root
+    description: Location and properties to use to allocate a compute instance
+    properties:
+      location_name:
+        type: string
+        description: Location where to allocate the compute instance
+        required: false
+      flavor:
+        type: string
+        description: >
+          Openstack compute instance flavor name
+        required: false
+      image_id:
+        type: string
+        description: >
+          Openstack compute instance image ID
+        required: false
+      floatting_ip_pool:
+        type: string
+        description: >
+          Openstack floating IP pool
+        required: false
+      user:
+        type: string
+        description: >
+          User used to connect to the compute instance
+        required: false
+  org.lexis.common.dynamic.orchestration.types.HPCTaskLocation:
+    derived_from: tosca.datatypes.Root
+    description: Cluster location of a HEAppE job task
+    properties:
+      cluster_node_type_id:
+        type: integer
+        description: HEAppE cluster node type identifier
+        required: false
+      command_template_id:
+        type: integer
+        description: HEAppE command template identifier
+        required: false
+  org.lexis.common.dynamic.orchestration.types.HPCLocation:
+    derived_from: tosca.datatypes.Root
+    description: Location and properties to use to allocate a job
+    properties:
+      location_name:
+        type: string
+        description: Location where to allocate the job
+        required: false
+      project_name:
+        type: string
+        description: HPC project name
+        required: false
+      cluster_id:
+        type: integer
+        description: HEAppE cluster identifier
+        required: false
+      tasks_location:
+        type: map
+        description: Tasks location details 
+        entry_schema:
+          type: org.lexis.common.dynamic.orchestration.types.HPCTaskLocation
+        required: false
+artifact_types:
+  org.lexis.common.dynamic.orchestration.artifacts.Deployment:
+    derived_from: tosca.artifacts.Deployment
+node_types:
+  org.lexis.common.dynamic.orchestration.nodes.SetLocationsJob:
+    derived_from: tosca.nodes.Root
+    description: >
+      Compute the best locations where to allocate the associated infrastructure resources components
+    properties:
+      token:
+        description: OpenID Connect token
+        type: string
+        required: true
+      project_id:
+        description: LEXIS project identifier
+        type: string
+        required: true
+    attributes:
+      nodes_locations:
+        type: string
+        description: json map providing for each node, its selected location
+      cloud_requirements:
+        type: map
+        description: Requirements on cloud instances
+        entry_schema:
+          type: org.lexis.common.dynamic.orchestration.types.CloudRequirement
+      hpc_requirements:
+        type: map
+        description: Requirements on HPC jobs
+        entry_schema:
+          type: org.lexis.common.dynamic.orchestration.types.HPCRequirement
+      dataset_requirements:
+        type: map
+        description: Requirements from input datasets
+        entry_schema:
+          type: org.lexis.common.dynamic.orchestration.types.DatasetRequirement
+      cloud_locations:
+        type: map
+        description: Locations to use for cloud instances
+        entry_schema:
+          type: org.lexis.common.dynamic.orchestration.types.CloudLocation
+      hpc_locations:
+        type: map
+        description: Locations to use for HPC jobs
+        entry_schema:
+          type: org.lexis.common.dynamic.orchestration.types.HPCLocation
+      request_id:
+        type: string
+        description: >
+          ID of the request to compute the best locations
+    requirements:
+      - cloud_instance:
+          capability: tosca.capabilities.OperatingSystem
+          node: tosca.nodes.Compute
+          relationship: org.lexis.common.dynamic.orchestration.relationships.CloudResource
+          occurrences: [0, UNBOUNDED]
+      - heappe_job:
+          capability: org.lexis.common.heappe.capabilities.HeappeJob
+          node: org.lexis.common.heappe.nodes.Job
+          relationship: org.lexis.common.dynamic.orchestration.relationships.HeappeJob
+          occurrences: [0, UNBOUNDED]
+      - input_dataset:
+          capability: org.lexis.common.ddi.capabilities.DatasetInfo
+          node: org.lexis.common.ddi.nodes.pub.GetDatasetInfo
+          relationship: org.lexis.common.dynamic.orchestration.relationships.Dataset
+          occurrences: [0, UNBOUNDED]
+    interfaces:
+      tosca.interfaces.node.lifecycle.Runnable:
+        inputs:
+          TOKEN: { get_property: [SELF, token] }
+        submit:
+          implementation:
+            file: "embedded"
+            type: org.lexis.common.dynamic.orchestration.artifacts.Deployment
+        run:
+          implementation:
+            file: "embedded"
+            type: org.lexis.common.dynamic.orchestration.artifacts.Deployment
+  org.lexis.common.dynamic.orchestration.nodes.ValidateAndExchangeToken:
+    derived_from: tosca.nodes.Root
+    description: >
+      Validate an input token and exchange it for the orchestrator client
+    properties:
+      token:
+        description: OpenID Connect token
+        type: string
+        required: true
+      project_id:
+        description: LEXIS project identifier
+        type: string
+        required: true
+    interfaces:
+      Standard:
+        inputs:
+          TOKEN: { get_property: [SELF, token] }
+        start:
+          implementation:
+            file: "embedded"
+            type: org.lexis.common.dynamic.orchestration.artifacts.Deployment
+  org.lexis.common.dynamic.orchestration.nodes.RefreshTargetTokens:
+    derived_from: tosca.nodes.Root
+    description: >
+      Refreshes the access token attribute of the associated target
+    requirements:
+      - target:
+          capability: tosca.capabilities.Node
+          node: tosca.nodes.Root
+          relationship: tosca.relationships.DependsOn
+          occurrences: [ 1, 1 ]
+    interfaces:
+      Standard:
+        start:
+          implementation:
+            file: "embedded"
+            type: org.lexis.common.dynamic.orchestration.artifacts.Deployment
+relationship_types:
+  org.lexis.common.dynamic.orchestration.relationships.CloudResource:
+    derived_from: tosca.relationships.DependsOn
+    description: >
+      Relationship with a Cloud compute instance
+    valid_target_types: [ tosca.capabilities.OperatingSystem ]
+    interfaces:
+      Configure:
+        pre_configure_source:
+          inputs:
+            NUM_CPUS: { get_property: [TARGET, host, num_cpus] }
+            MEM_SIZE: { get_property: [TARGET, host, mem_size] }
+            DISK_SIZE: { get_property: [TARGET, host, disk_size] }
+            OS_TYPE: { get_property: [TARGET, os, type] }
+            OS_DISTRIBUTION: { get_property: [TARGET, os, distribution] }
+            OS_VERSION: { get_property: [TARGET, os, version] }
+          implementation:
+            file: "embedded"
+            type: org.lexis.common.dynamic.orchestration.artifacts.Deployment
+  org.lexis.common.dynamic.orchestration.relationships.OptionalCloudResource:
+    derived_from: org.lexis.common.dynamic.orchestration.relationships.CloudResource
+    description: >
+      Relationship with a Cloud compute instance that can be skipped if no location is available for it
+  org.lexis.common.dynamic.orchestration.relationships.HeappeJob:
+    derived_from: tosca.relationships.DependsOn
+    description: >
+      Relationship with a HEAppE job
+    valid_target_types: [ org.lexis.common.heappe.capabilities.HeappeJob ]
+    interfaces:
+      Configure:
+        pre_configure_source:
+          inputs:
+            JOB_SPECIFICATION: { get_property: [TARGET, JobSpecification] }
+          implementation:
+            file: "embedded"
+            type: org.lexis.common.dynamic.orchestration.artifacts.Deployment
+  org.lexis.common.dynamic.orchestration.relationships.OptionalHeappeJob:
+    derived_from: org.lexis.common.dynamic.orchestration.relationships.HeappeJob
+    description: >
+      Relationship with a HEAppE job that can be skipped if no location is available for it
+  org.lexis.common.dynamic.orchestration.relationships.Dataset:
+    derived_from: tosca.relationships.DependsOn
+    description: >
+      Relationship with an input dataset
+    valid_target_types: [ org.lexis.common.ddi.capabilities.DatasetInfo ]
+    interfaces:
+      Configure:
+        pre_configure_source:
+          inputs:
+            LOCATIONS: { get_attribute: [TARGET, dataset_info, locations] }
+            SIZE: { get_attribute: [TARGET, dataset_info, size] }
+            NUMBER_OF_FILES: { get_attribute: [TARGET, dataset_info, number_of_files] }
+            NUMBER_OF_SMALL_FILES: { get_attribute: [TARGET, dataset_info, number_of_small_files] }
+          implementation:
+            file: "embedded"
+            type: org.lexis.common.dynamic.orchestration.artifacts.Deployment
