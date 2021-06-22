@@ -2,7 +2,7 @@ tosca_definitions_version: alien_dsl_2_0_0
 
 metadata:
   template_name: org.lexis.common.dynamic-orchestration-types
-  template_version: 1.0.0
+  template_version: 1.0.1
   template_author: lexis
 
 description: Dynamic orchestration types
@@ -26,6 +26,10 @@ data_types:
       disk_size:
         type: scalar-unit.size
         description: Size of the local disk available to applications running on the Compute node (default unit is MB).
+        required: false
+      image_name:
+        type: string
+        description: the name of a custom image to use for the compute instance
         required: false
       os_type:
         type: string
@@ -250,19 +254,6 @@ relationship_types:
     description: >
       Relationship with a Cloud compute instance
     valid_target_types: [ tosca.capabilities.OperatingSystem ]
-    interfaces:
-      Configure:
-        pre_configure_source:
-          inputs:
-            NUM_CPUS: { get_property: [TARGET, host, num_cpus] }
-            MEM_SIZE: { get_property: [TARGET, host, mem_size] }
-            DISK_SIZE: { get_property: [TARGET, host, disk_size] }
-            OS_TYPE: { get_property: [TARGET, os, type] }
-            OS_DISTRIBUTION: { get_property: [TARGET, os, distribution] }
-            OS_VERSION: { get_property: [TARGET, os, version] }
-          implementation:
-            file: dynamic-orchestration-types-a4c.yaml
-            type: org.alien4cloud.artifacts.AnsiblePlaybook
   org.lexis.common.dynamic.orchestration.relationships.OptionalCloudResource:
     derived_from: org.lexis.common.dynamic.orchestration.relationships.CloudResource
     description: >
