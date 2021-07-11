@@ -32,6 +32,7 @@ import (
 	"github.com/ystia/yorc/v4/config"
 	"github.com/ystia/yorc/v4/deployments"
 	"github.com/ystia/yorc/v4/events"
+	"github.com/ystia/yorc/v4/log"
 	"github.com/ystia/yorc/v4/prov"
 	"github.com/ystia/yorc/v4/prov/operations"
 	"github.com/ystia/yorc/v4/tosca"
@@ -53,7 +54,6 @@ const (
 	hostCapabilityName               = "host"
 	osCapabilityName                 = "os"
 	datasetInfoCapabilityName        = "dataset_info"
-	damInfrastructureType            = "dam"
 )
 
 // SetLocationsExecution holds Locations computation properties
@@ -66,6 +66,7 @@ type SetLocationsExecution struct {
 	DeploymentID           string
 	TaskID                 string
 	NodeName               string
+	User                   string
 	Operation              prov.Operation
 	EnvInputs              []*operations.EnvInput
 	VarInputsNames         []string
@@ -130,6 +131,7 @@ type CloudLocation struct {
 	ImageID        string `json:"image_id"`
 	FloatingIPPool string `json:"floating_ip_pool"`
 	User           string `json:"user"`
+	HEAppEURL      string `json:"heappe_url"`
 }
 
 // TaskLocation holds properties of a task
@@ -174,6 +176,7 @@ func (e *SetLocationsExecution) ExecuteAsync(ctx context.Context) (*prov.Action,
 	data[actionDataNodeName] = e.NodeName
 	data[actionDataRequestID] = requestID
 	data[actionDataRequestType] = requestType
+	data[actionDataUserName] = e.User
 
 	return &prov.Action{ActionType: computeBestLocationAction, Data: data}, e.MonitoringTimeInterval, err
 }
@@ -228,6 +231,11 @@ func (e *SetLocationsExecution) Execute(ctx context.Context) error {
 
 func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Context) error {
 
+	// Forcing a refresh of the token to start the dynamic workflow with a fresh token
+	_, _, err := refreshToken(ctx, e.LocationProps, e.DeploymentID)
+	if err != nil {
+		return err
+	}
 	// Find associated targets for which to update the locations
 	cloudReqs, hpcReqs, datasetReqs, err := e.findAssociatedTargets(ctx)
 	if err != nil {
@@ -331,7 +339,13 @@ func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Con
 		}
 
 		if submittedReq.Status != dam.RequestStatusOK {
-			return errors.Errorf("Got response %s for Cloud placement request %v", string(reqVal), submittedReq)
+			// TODO: remove this
+			if strings.Contains(strings.ToLower(damCloudReq.OSVersion), "windows") {
+				submittedReq.RequestID = "TestADMSRequestID"
+				log.Printf("TODO: remove this code workaround for DAM response %s for windows request %v\n", string(reqVal), submittedReq)
+			} else {
+				return errors.Errorf("Got response %s for Cloud placement request %v", string(reqVal), submittedReq)
+			}
 		}
 		requestID = submittedReq.RequestID
 		requestType = requestTypeCloud
@@ -342,7 +356,7 @@ func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Con
 			e.NodeName, string(reqVal))
 		submittedReq, err := client.SubmitHPCPlacementRequest(token, damHPCReq)
 		if err != nil {
-			return errors.Wrapf(err, "Failed to submit cloud placement request %s", string(reqVal))
+			return errors.Wrapf(err, "Failed to submit HPC placement request %s", string(reqVal))
 		}
 
 		if submittedReq.Status != dam.RequestStatusOK {
@@ -816,7 +830,7 @@ func getOSVersion(req CloudRequirement) string {
 		case "Fedora":
 			osVersion = "33"
 		default:
-			osVersion = "18.04-LTS-bionic"
+			osVersion = "18.04"
 		}
 	}
 	return fmt.Sprintf("%s-%s", osDistribution, osVersion)
