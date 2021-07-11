@@ -270,6 +270,9 @@ func (o *ActionOperator) computeLocations(ctx context.Context, cfg config.Config
 			user = "centos"
 		} else if strings.ToLower(req.OSType) == "windows" {
 			user = "Admin"
+		} else if distrib == "custom" {
+			// Custom image specified, no user change here, has to be specified by the inputs
+			user = ""
 		}
 
 		cloudLocations[nodeName] = CloudLocation{
@@ -504,14 +507,16 @@ func (o *ActionOperator) setCloudLocation(ctx context.Context, deploymentID, nod
 	if !ok {
 		return errors.Errorf("Found no credentials defined for node %s in deployment %s", nodeName, deploymentID)
 	}
-	creds := val.GetMap()
-	creds["user"] = location.User
-	credsVal := tosca.ValueAssignment{
-		Type:  tosca.ValueAssignmentMap,
-		Value: creds,
-	}
 
-	nodeTemplate.Capabilities["endpoint"].Properties["credentials"] = &credsVal
+	if location.User != "" {
+		creds := val.GetMap()
+		creds["user"] = location.User
+		credsVal := tosca.ValueAssignment{
+			Type:  tosca.ValueAssignmentMap,
+			Value: creds,
+		}
+		nodeTemplate.Capabilities["endpoint"].Properties["credentials"] = &credsVal
+	}
 
 	// Location is now changed for this node template, storing it
 	err = storeNodeTemplate(ctx, deploymentID, nodeName, nodeTemplate)

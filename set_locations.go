@@ -77,6 +77,7 @@ type CloudRequirement struct {
 	NumCPUs        string `json:"num_cpus"`
 	MemSize        string `json:"mem_size"`
 	DiskSize       string `json:"disk_size"`
+	ImageName      string `json:"image_name"`
 	OSType         string `json:"os_type"`
 	OSDistribution string `json:"os_distribution"`
 	OSVersion      string `json:"os_version"`
@@ -233,7 +234,7 @@ func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Con
 		return err
 	}
 
-	var damStorageInputs []dam.StorageInput
+	damStorageInputs := make([]dam.StorageInput, 0)
 	for nodeName, datasetReq := range datasetReqs {
 		var storageInput dam.StorageInput
 		storageLocs := datasetReq.Locations
@@ -259,7 +260,14 @@ func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Con
 					datasetReq.NumberOfFiles, nodeName)
 			}
 		}
-		damStorageInputs = append(damStorageInputs, storageInput)
+		// DAM expects non empty datasets
+		if storageInput.Size == 0 {
+			events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, e.DeploymentID).Registerf(
+				"Dynamic Allocator Module does not expect empty datasets, ignoring  %s in placement request",
+				nodeName)
+		} else {
+			damStorageInputs = append(damStorageInputs, storageInput)
+		}
 	}
 	var damCloudReq dam.CloudRequirement
 	damCloudReq.NumberOfLocations = 1
@@ -507,6 +515,9 @@ func (e *SetLocationsExecution) getCloudRequirement(ctx context.Context, targetN
 		}
 	}
 
+	// Get image name
+	cloudReq.ImageName, _ = deployments.GetStringNodeProperty(ctx, e.DeploymentID, targetName, "imageName", false)
+
 	return cloudReq, err
 }
 
@@ -578,33 +589,6 @@ func (e *SetLocationsExecution) getDatasetRequirement(ctx context.Context, targe
 	}
 
 	return datasetReq, err
-}
-
-// getCloudRequirementFromEnvInputs gets the relationship operation input parameters
-func (e *SetLocationsExecution) getCloudRequirementFromEnvInputs() (CloudRequirement, error) {
-	var req CloudRequirement
-	var err error
-	for _, envInput := range e.EnvInputs {
-		switch envInput.Name {
-		case "NUM_CPUS":
-			req.NumCPUs = envInput.Value
-		case "MEM_SIZE":
-			req.MemSize = envInput.Value
-		case "DISK_SIZE":
-			req.DiskSize = envInput.Value
-		case "OS_TYPE":
-			req.OSType = envInput.Value
-		case "OS_DISTRIBUTION":
-			req.OSDistribution = envInput.Value
-		case "OS_VERSION":
-			req.OSVersion = envInput.Value
-
-		default:
-			// Not a requirement on cloud instance resource
-		}
-	}
-
-	return req, err
 }
 
 // getStoredCloudRequirements retrieves cloud requirements already computed and
@@ -806,6 +790,9 @@ func getMaxCPU(cpuNumber int, newCPUNumberStr string) (int, error) {
 
 func getOSVersion(req CloudRequirement) string {
 	var osDistribution, osVersion string
+	if req.ImageName != "" {
+		return req.ImageName
+	}
 	if req.OSType == "windows" {
 		return req.OSType
 	}
