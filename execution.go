@@ -33,6 +33,8 @@ import (
 const (
 	ddiInfrastructureType                 = "ddi"
 	heappeInfrastructureType              = "heappe"
+	damInfrastructureType                 = "dam"
+	openstackInfrastructureType           = "openstack"
 	locationDefaultMonitoringTimeInterval = 5 * time.Second
 	locationJobMonitoringTimeInterval     = "job_monitoring_time_interval"
 	setLocationsComponentType             = "org.lexis.common.dynamic.orchestration.nodes.SetLocationsJob"
@@ -147,10 +149,16 @@ func newExecution(ctx context.Context, cfg config.Configuration, taskID, deploym
 
 	if !valid {
 		log.Printf("Dynamic Orchestration plugin requests to refresh token for deployment %s\n", deploymentID)
-		_, _, err = aaiClient.RefreshToken(ctx)
+		accessToken, _, err = aaiClient.RefreshToken(ctx)
 		if err != nil {
 			return exec, errors.Wrapf(err, "Failed to refresh token for orchestrator")
 		}
+	}
+
+	// Getting user info
+	userInfo, err := aaiClient.GetUserInfo(ctx, accessToken)
+	if err != nil {
+		return exec, errors.Wrapf(err, "Job %s, failed to get user info from access token", nodeName)
 	}
 
 	monitoringTimeInterval := locationProps.GetDuration(locationJobMonitoringTimeInterval)
@@ -183,6 +191,7 @@ func newExecution(ctx context.Context, cfg config.Configuration, taskID, deploym
 			DeploymentID:           deploymentID,
 			TaskID:                 taskID,
 			NodeName:               nodeName,
+			User:                   userInfo.GetName(),
 			Operation:              operation,
 			MonitoringTimeInterval: monitoringTimeInterval,
 		}
@@ -201,6 +210,7 @@ func newExecution(ctx context.Context, cfg config.Configuration, taskID, deploym
 			DeploymentID: deploymentID,
 			TaskID:       taskID,
 			NodeName:     nodeName,
+			User:         userInfo.GetName(),
 			Operation:    operation,
 		}
 		return exec, exec.ResolveExecution(ctx)
