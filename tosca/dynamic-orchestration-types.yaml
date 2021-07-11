@@ -9,7 +9,7 @@ description: Dynamic orchestration types
 
 imports:
   - org.lexis.common.heappe-types:1.0.6
-  - org.lexis.common.ddi-types:1.0.0
+  - org.lexis.common.ddi-types:1.0.1
 
 data_types:
   org.lexis.common.dynamic.orchestration.types.CloudRequirement:
@@ -103,7 +103,7 @@ data_types:
         description: >
           Openstack compute instance image ID
         required: false
-      floatting_ip_pool:
+      floating_ip_pool:
         type: string
         description: >
           Openstack floating IP pool
@@ -112,6 +112,11 @@ data_types:
         type: string
         description: >
           User used to connect to the compute instance
+        required: false
+      heappe_url:
+        type: string
+        description: >
+          HEAppE URL used to get Cloud Location credentials
         required: false
   org.lexis.common.dynamic.orchestration.types.HPCTaskLocation:
     derived_from: tosca.datatypes.Root
