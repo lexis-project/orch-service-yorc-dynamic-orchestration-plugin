@@ -60,6 +60,9 @@ type CloudLocation struct {
 	FloatingIPPool        string   `json:"NetworkIP"`
 	Location              string   `json:"location"`
 	StorageInputLocations []string `json:"storage_inputs"`
+	HEAppEURL             string   `json:"HEAppE_URL,omitempty"`
+	OpenStackURL          string   `json:"OpenStack_URL,omitempty"`
+	ProjectName           string   `json:"project,omitempty"`
 }
 
 // TaskLocation holds properties of a selected HPC infrastructure for a HEAppE task

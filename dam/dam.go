@@ -53,7 +53,7 @@ type Client interface {
 	GetHPCPlacementRequestStatus(token string, requestID string) (HPCPlacement, error)
 }
 
-// GetClient returns a DDI client for a given location
+// GetClient returns a DAM client for a given location
 func GetClient(locationProps config.DynamicMap, refreshTokenFunc RefreshTokenFunc) (Client, error) {
 
 	url := locationProps.GetString(locationDynamicAllocatorModuleURLPropertyName)
