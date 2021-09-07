@@ -45,6 +45,7 @@ const (
 	requestStatusPending       = "PENDING"
 	requestStatusRunning       = "RUNNING"
 	requestStatusCompleted     = "COMPLETED"
+	requestStatusFailed        = "FAILED"
 
 	// computeBestLocationAction is the action of computing the best location
 	computeBestLocationAction = "compute-best-location"
@@ -152,7 +153,6 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 			events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
 				"Component %s received from Dynamic Allocator Module HPC placement results %+v",
 				actionData.nodeName, hpcPlacement)
-
 		}
 
 	default:
@@ -168,7 +168,8 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 	case status == dam.RequestStatusOK:
 		requestStatus = requestStatusCompleted
 	default:
-		return true, errors.Errorf("Unexpected status :%q", status)
+		requestStatus = requestStatusFailed
+		errorMessage = status
 	}
 
 	previousRequestStatus, err := deployments.GetInstanceStateString(ctx, deploymentID, actionData.nodeName, "0")
@@ -186,7 +187,7 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 	case requestStatusPending, requestStatusRunning:
 		// job's still running or its state is about to be set definitively: monitoring is keeping on (deregister stays false)
 	default:
-		// Other cases as FAILED, CANCELED : error is return with job state and job info is logged
+		// Other cases are failures
 		deregister = true
 		// Log event containing all the slurm information
 
@@ -573,6 +574,10 @@ func (o *ActionOperator) setCloudLocation(ctx context.Context, cfg config.Config
 	volumeVal := tosca.ValueAssignment{
 		Type:  tosca.ValueAssignmentMap,
 		Value: bootVolume,
+	}
+	if !strings.HasPrefix(location.Name, "it4i_") {
+		// no burst buffer except possibly on it4i
+		bootVolume["volume_type"] = ""
 	}
 	nodeTemplate.Properties["boot_volume"] = &volumeVal
 
