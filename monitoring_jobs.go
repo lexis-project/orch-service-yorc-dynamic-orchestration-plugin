@@ -413,13 +413,13 @@ func findHEAppELocation(ctx context.Context, cfg config.Configuration, url, site
 	var newLocationConfig locations.LocationConfiguration
 	if sameSiteLocationConfig.Name != "" {
 		newLocationConfig = sameSiteLocationConfig
-		newLocationConfig.Name = sameSiteLocationConfig.Name + "_" + path.Base(url)
 		newLocationConfig.Properties.Set("url", url)
 	} else if sameTypeLocationConfig.Name != "" {
 		newLocationConfig = sameTypeLocationConfig
 		newLocationConfig.Name = site + "_heappe_" + path.Base(url)
 		newLocationConfig.Properties.Set("url", url)
 	}
+	newLocationConfig.Name = site + "_heappe_" + path.Base(url)
 
 	if newLocationConfig.Name != "" {
 		// Adding a new location
@@ -484,6 +484,9 @@ func findCloudLocation(ctx context.Context, cfg config.Configuration, cloudLocat
 	newLocationConfig.Properties.Set("user_name", "")
 	newLocationConfig.Properties.Set("password", "")
 	newLocationConfig.Properties.Set("project_id", "")
+	if cloudLocation.PrivateNetwork != "" {
+		newLocationConfig.Properties.Set("private_network_name", cloudLocation.PrivateNetwork)
+	}
 
 	// Adding a new location
 	events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(

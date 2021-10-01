@@ -51,6 +51,7 @@ const (
 	osCapability                     = "tosca.capabilities.OperatingSystem"
 	heappeJobCapability              = "org.lexis.common.heappe.capabilities.HeappeJob"
 	datasetInfoCapability            = "org.lexis.common.ddi.capabilities.DatasetInfo"
+	setLocationCapability            = "org.lexis.common.dynamic.orchestration.capabilities.SetLocation"
 	hostCapabilityName               = "host"
 	osCapabilityName                 = "os"
 	datasetInfoCapabilityName        = "dataset_info"
@@ -237,11 +238,28 @@ func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Con
 		return err
 	}
 	// Find associated targets for which to update the locations
-	cloudReqs, hpcReqs, datasetReqs, err := e.findAssociatedTargets(ctx)
+	cloudReqs, hpcReqs, datasetReqs, previousRequestID, err := e.findAssociatedTargets(ctx)
 	if err != nil {
 		return err
 	}
-
+	attempt := 0
+	if previousRequestID != "" {
+		// get the number of attempt defined in property
+		val, err := deployments.GetStringNodePropertyValue(ctx, e.DeploymentID,
+			e.NodeName, "attempt")
+		if err != nil {
+			return err
+		}
+		attempt, err = strconv.Atoi(val)
+		if err != nil {
+			return errors.Wrapf(err, "Failed to parse int property attempt value %s for node %s", val, e.NodeName)
+		}
+		if attempt == 0 {
+			// The default value is referenced, but as previousRequestID is defined,
+			// considering this is a second attempt to get a location
+			attempt = 1
+		}
+	}
 	damStorageInputs := make([]dam.StorageInput, 0)
 	for nodeName, datasetReq := range datasetReqs {
 		var storageInput dam.StorageInput
@@ -281,6 +299,8 @@ func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Con
 	damCloudReq.NumberOfLocations = 1
 	for nodeName, cloudReq := range cloudReqs {
 		damCloudReq.NumberOfInstances = damCloudReq.NumberOfInstances + 1
+		damCloudReq.Attempt = attempt
+		damCloudReq.PreviousRequestID = previousRequestID
 		damCloudReq.Project = e.ProjectID
 		damCloudReq.OSVersion = getOSVersion(cloudReq)
 		damCloudReq.MaxWallTime = 1000
@@ -306,6 +326,8 @@ func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Con
 	damHPCReq.Number = len(hpcReqs)
 	for _, hpcReq := range hpcReqs {
 		damHPCReq.Project = e.ProjectID
+		damHPCReq.Attempt = attempt
+		damHPCReq.PreviousRequestID = previousRequestID
 		damHPCReq.MaxWallTime = hpcReq.Tasks[0].WalltimeLimit
 		damHPCReq.MaxCores = hpcReq.Tasks[0].MaxCores
 		damHPCReq.TaskName = hpcReq.Tasks[0].Name
@@ -417,14 +439,14 @@ func (e *SetLocationsExecution) resolveInputs(ctx context.Context) error {
 
 // findAssociatedTarget finds which compute instances, datasets and HPC jobs are
 // associated to this component
-func (e *SetLocationsExecution) findAssociatedTargets(ctx context.Context) (map[string]CloudRequirement, map[string]HPCRequirement, map[string]DatasetRequirement, error) {
+func (e *SetLocationsExecution) findAssociatedTargets(ctx context.Context) (map[string]CloudRequirement, map[string]HPCRequirement, map[string]DatasetRequirement, string, error) {
 	cloudReqs := make(map[string]CloudRequirement)
 	hpcReqs := make(map[string]HPCRequirement)
 	datasetReqs := make(map[string]DatasetRequirement)
-
+	var previousRequestID string
 	nodeTemplate, err := getStoredNodeTemplate(ctx, e.DeploymentID, e.NodeName)
 	if err != nil {
-		return cloudReqs, hpcReqs, datasetReqs, err
+		return cloudReqs, hpcReqs, datasetReqs, previousRequestID, err
 	}
 
 	// Get the associated targets
@@ -434,23 +456,28 @@ func (e *SetLocationsExecution) findAssociatedTargets(ctx context.Context) (map[
 			case osCapability:
 				req, err := e.getCloudRequirement(ctx, reqAssignment.Node)
 				if err != nil {
-					return cloudReqs, hpcReqs, datasetReqs, err
+					return cloudReqs, hpcReqs, datasetReqs, previousRequestID, err
 				}
 				req.Optional = (reqAssignment.Relationship == optionalCloudTargetRelationship)
 				cloudReqs[reqAssignment.Node] = req
 			case heappeJobCapability:
 				req, err := e.getHPCRequirement(ctx, reqAssignment.Node)
 				if err != nil {
-					return cloudReqs, hpcReqs, datasetReqs, err
+					return cloudReqs, hpcReqs, datasetReqs, previousRequestID, err
 				}
 				req.Optional = (reqAssignment.Relationship == optionalHEAppETargetRelationship)
 				hpcReqs[reqAssignment.Node] = req
 			case datasetInfoCapability:
 				req, err := e.getDatasetRequirement(ctx, reqAssignment.Node)
 				if err != nil {
-					return cloudReqs, hpcReqs, datasetReqs, err
+					return cloudReqs, hpcReqs, datasetReqs, previousRequestID, err
 				}
 				datasetReqs[reqAssignment.Node] = req
+			case setLocationCapability:
+				previousRequestID, err = e.getPreviousRequestID(ctx, reqAssignment.Node)
+				if err != nil {
+					return cloudReqs, hpcReqs, datasetReqs, previousRequestID, err
+				}
 
 			default:
 				// Ignoring
@@ -464,24 +491,24 @@ func (e *SetLocationsExecution) findAssociatedTargets(ctx context.Context) (map[
 	if err != nil {
 		err = errors.Wrapf(err, "Failed to store cloud requirement details for deployment %s node %s",
 			e.DeploymentID, e.NodeName)
-		return cloudReqs, hpcReqs, datasetReqs, err
+		return cloudReqs, hpcReqs, datasetReqs, previousRequestID, err
 	}
 	err = deployments.SetAttributeComplexForAllInstances(ctx, e.DeploymentID, e.NodeName,
 		hpcReqConsulAttribute, hpcReqs)
 	if err != nil {
 		err = errors.Wrapf(err, "Failed to store HPC requirement details for deployment %s node %s",
 			e.DeploymentID, e.NodeName)
-		return cloudReqs, hpcReqs, datasetReqs, err
+		return cloudReqs, hpcReqs, datasetReqs, previousRequestID, err
 	}
 	err = deployments.SetAttributeComplexForAllInstances(ctx, e.DeploymentID, e.NodeName,
 		datasetReqConsulAttribute, datasetReqs)
 	if err != nil {
 		err = errors.Wrapf(err, "Failed to store dataset requirement details for deployment %s node %s",
 			e.DeploymentID, e.NodeName)
-		return cloudReqs, hpcReqs, datasetReqs, err
+		return cloudReqs, hpcReqs, datasetReqs, previousRequestID, err
 	}
 
-	return cloudReqs, hpcReqs, datasetReqs, err
+	return cloudReqs, hpcReqs, datasetReqs, previousRequestID, err
 }
 
 // getCloudRequirement finds requirements of a cloud compute instance
@@ -603,6 +630,28 @@ func (e *SetLocationsExecution) getDatasetRequirement(ctx context.Context, targe
 	}
 
 	return datasetReq, err
+}
+
+// getPreviousRequestID finds a previous request ID for a location (used for failovers to get a different location from previous request)
+func (e *SetLocationsExecution) getPreviousRequestID(ctx context.Context, targetName string) (string, error) {
+	var requestID string
+	var err error
+
+	ids, err := deployments.GetNodeInstancesIds(ctx, e.DeploymentID, targetName)
+	if err != nil {
+		return requestID, err
+	}
+
+	val, err := deployments.GetInstanceAttributeValue(ctx, e.DeploymentID,
+		targetName, ids[0], requestIDConsulAttribute)
+	if err != nil {
+		return requestID, err
+	}
+	if val != nil {
+		requestID = val.RawString()
+	}
+
+	return requestID, err
 }
 
 // getStoredCloudRequirements retrieves cloud requirements already computed and

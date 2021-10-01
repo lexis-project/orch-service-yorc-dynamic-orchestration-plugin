@@ -34,16 +34,20 @@ type CloudRequirement struct {
 	Memory            int            `json:"mem"`
 	Disk              int            `json:"disk"`
 	StorageInputs     []StorageInput `json:"storage_inputs"`
+	Attempt           int            `json:"attempt"`
+	PreviousRequestID string         `json:"original_request_id"`
 }
 
 // HPCRequirement holds parameters of requirements for HPC jobs to create
 type HPCRequirement struct {
-	Number        int            `json:"number"`
-	Project       string         `json:"project"`
-	MaxWallTime   int            `json:"max_walltime"`
-	MaxCores      int            `json:"max_cores"`
-	TaskName      string         `json:"taskName"`
-	StorageInputs []StorageInput `json:"storage_inputs"`
+	Number            int            `json:"number"`
+	Project           string         `json:"project"`
+	MaxWallTime       int            `json:"max_walltime"`
+	MaxCores          int            `json:"max_cores"`
+	TaskName          string         `json:"taskName"`
+	StorageInputs     []StorageInput `json:"storage_inputs"`
+	Attempt           int            `json:"attempt"`
+	PreviousRequestID string         `json:"original_request_id"`
 }
 
 // SubmittedRequestInfo holds the result of a request submission
@@ -58,6 +62,7 @@ type CloudLocation struct {
 	Flavor                string   `json:"flavour"`
 	ImageID               string   `json:"image_id"`
 	FloatingIPPool        string   `json:"NetworkIP"`
+	PrivateNetwork        string   `json:"PrivateNetwork,omitempty"`
 	Location              string   `json:"location"`
 	StorageInputLocations []string `json:"storage_inputs"`
 	HEAppEURL             string   `json:"HEAppE_URL,omitempty"`

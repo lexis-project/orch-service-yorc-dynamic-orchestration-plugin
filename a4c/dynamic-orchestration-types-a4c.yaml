@@ -165,6 +165,11 @@ node_types:
         description: LEXIS project identifier
         type: string
         required: true
+      attempt:
+        description: Attempt number to get a location from DAM (first 0, second after a faolover 1)
+        type: integer
+        required: false
+        default: 0
     attributes:
       nodes_locations:
         type: string
@@ -188,6 +193,9 @@ node_types:
         type: string
         description: >
           ID of the request to compute the best locations
+    capabilities:
+      set_location:
+        type: org.lexis.common.dynamic.orchestration.capabilities.SetLocation
     requirements:
       - cloud_instance:
           capability: tosca.capabilities.OperatingSystem
@@ -204,6 +212,11 @@ node_types:
           node: org.lexis.common.ddi.nodes.pub.GetDatasetInfo
           relationship: org.lexis.common.dynamic.orchestration.relationships.Dataset
           occurrences: [0, UNBOUNDED]
+      - previous_request:
+          capability: org.lexis.common.dynamic.orchestration.capabilities.SetLocation
+          node: org.lexis.common.dynamic.orchestration.nodes.SetLocationsJob
+          relationship: tosca.relationships.DependsOn
+          occurrences: [0, 1]
     interfaces:
       tosca.interfaces.node.lifecycle.Runnable:
         inputs:
@@ -253,6 +266,19 @@ node_types:
           implementation:
             file: dynamic-orchestration-types-a4c.yaml
             type: org.alien4cloud.artifacts.AnsiblePlaybook
+capability_types:
+  org.lexis.common.dynamic.orchestration.capabilities.SetLocation:
+    derived_from: tosca.capabilities.Root
+    description: >
+      A capability providing locations where to allocate resources
+    attributes:
+      nodes_locations:
+        type: string
+        description: json map providing for each node, its selected location
+      request_id:
+        type: string
+        description: >
+          ID of the request to compute the best locations
 relationship_types:
   org.lexis.common.dynamic.orchestration.relationships.CloudResource:
     derived_from: tosca.relationships.DependsOn
