@@ -40,6 +40,7 @@ type RefreshTargetTokens struct {
 	DeploymentID string
 	NodeName     string
 	TaskID       string
+	User         string
 	Operation    prov.Operation
 }
 
@@ -67,10 +68,28 @@ func (r *RefreshTargetTokens) Execute(ctx context.Context) error {
 			var accessToken string
 			accessToken, _, err = aaiClient.RefreshToken(ctx)
 			if err != nil {
-				return err
+				break
 			}
 			err = deployments.SetAttributeForAllInstances(ctx, r.DeploymentID, targetNodeName,
 				"access_token", accessToken)
+			if err != nil {
+				return err
+			}
+
+			// For compute instances, the OpenStack token has also to be refreshed
+			var isComputeInstance bool
+			isComputeInstance, err = deployments.IsNodeDerivedFrom(ctx, r.DeploymentID, targetNodeName, "yorc.nodes.openstack.Compute")
+			if err != nil {
+				break
+			}
+
+			if isComputeInstance {
+				err = r.refreshComputeInstanceToken(ctx, targetNodeName)
+				if err != nil {
+					err = errors.Wrapf(err, "Failed to refresh compute instance token for %s", targetNodeName)
+				}
+			}
+
 		}
 	case "install", "uninstall", "standard.create", "standard.stop", "standard.delete":
 		// Nothing to do here
@@ -101,12 +120,76 @@ func (r *RefreshTargetTokens) getLocationTargetFromRequirement(ctx context.Conte
 		return nil, targetNodeName, err
 	}
 
-	locationProps, err := locationMgr.GetLocationPropertiesForNode(ctx,
-		r.DeploymentID, targetNodeName, ddiInfrastructureType)
-	if err == nil && len(locationProps) == 0 {
-		locationProps, err = locationMgr.GetLocationPropertiesForNode(ctx,
-			r.DeploymentID, targetNodeName, heappeInfrastructureType)
-	}
+	locationProps, err := locationMgr.GetPropertiesForFirstLocationOfType(damInfrastructureType)
 
 	return locationProps, targetNodeName, err
+}
+
+func (r *RefreshTargetTokens) refreshComputeInstanceToken(ctx context.Context, targetNodeName string) error {
+	nodeTemplate, err := getStoredNodeTemplate(ctx, r.DeploymentID, targetNodeName)
+	if err != nil {
+		return err
+	}
+	locationName, ok := nodeTemplate.Metadata[tosca.MetadataLocationNameKey]
+	if !ok {
+		return errors.Errorf("Found no location defined in metadata %s for %s", tosca.MetadataLocationNameKey, targetNodeName)
+	}
+	heappeURL, ok := nodeTemplate.Metadata[metadataCloudCredentialsURLKey]
+	if !ok {
+		return errors.Errorf("Found no HEAppE URL defined in metadata %s for %s", metadataCloudCredentialsURLKey, targetNodeName)
+	}
+
+	// Get a Cloud Service client and token
+	cloudClient, cloudToken, err := getCloudClientToken(ctx, r.Cfg, locationName, heappeURL, "yorc", r.DeploymentID)
+	if err != nil {
+		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelERROR, r.DeploymentID).Registerf(
+			"Failed to get token for cloud instance %s, error %s", locationName, err.Error())
+		return err
+	}
+
+	// Update token for the node
+	nodeTemplate.Metadata["token"] = cloudToken
+	credsID, credsSecret := cloudClient.GetCreds()
+	nodeTemplate.Metadata["token"] = cloudToken
+	nodeTemplate.Metadata["application_credential_id"] = credsID
+	nodeTemplate.Metadata["application_credential_secret"] = credsSecret
+
+	// Location is now changed for this node template, storing it
+	err = storeNodeTemplate(ctx, r.DeploymentID, targetNodeName, nodeTemplate)
+
+	// Update the associated Floating IP Node token
+	var floatingIPNodeName string
+	for _, nodeReq := range nodeTemplate.Requirements {
+		for _, reqAssignment := range nodeReq {
+			if reqAssignment.Capability == fipConnectivityCapability {
+				floatingIPNodeName = reqAssignment.Node
+				break
+			}
+		}
+	}
+	if floatingIPNodeName == "" {
+		// No associated floating IP pool to change, locations changes are done now
+		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, r.DeploymentID).Registerf(
+			"No floating IP associated to compute instance %s in deployment %s", targetNodeName, r.DeploymentID)
+		return err
+	}
+
+	fipNodeTemplate, err := getStoredNodeTemplate(ctx, r.DeploymentID, floatingIPNodeName)
+	if err != nil {
+		return err
+	}
+	if fipNodeTemplate.Metadata == nil {
+		fipNodeTemplate.Metadata = make(map[string]string)
+	}
+	fipNodeTemplate.Metadata["token"] = cloudToken
+	fipNodeTemplate.Metadata["application_credential_id"] = credsID
+	fipNodeTemplate.Metadata["application_credential_secret"] = credsSecret
+
+	// Location is now changed for this node template, storing it
+	err = storeNodeTemplate(ctx, r.DeploymentID, floatingIPNodeName, fipNodeTemplate)
+	if err != nil {
+		return err
+	}
+
+	return err
 }

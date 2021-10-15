@@ -21,7 +21,9 @@ import (
 	"path"
 	"strings"
 
+	"github.com/lexis-project/yorc-dynamic-orchestration-plugin/cloud"
 	"github.com/lexis-project/yorc-dynamic-orchestration-plugin/dam"
+	"github.com/lexis-project/yorc-heappe-plugin/heappe"
 	"github.com/pkg/errors"
 	"github.com/ystia/yorc/v4/config"
 	"github.com/ystia/yorc/v4/deployments"
@@ -43,6 +45,7 @@ const (
 	requestStatusPending       = "PENDING"
 	requestStatusRunning       = "RUNNING"
 	requestStatusCompleted     = "COMPLETED"
+	requestStatusFailed        = "FAILED"
 
 	// computeBestLocationAction is the action of computing the best location
 	computeBestLocationAction = "compute-best-location"
@@ -51,6 +54,11 @@ const (
 	actionDataRequestID   = "requestID"
 	actionDataRequestType = "requestType"
 	actionDataTaskID      = "taskID"
+	actionDataUserName    = "user"
+
+	// Key used in a Cloud Compute instance metadata
+	// to store the URL of the HEAppE instance
+	metadataCloudCredentialsURLKey = "lexis_credentials_url"
 )
 
 // ActionOperator holds function allowing to execute an action
@@ -93,6 +101,8 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 	if !ok {
 		return true, errors.Errorf("Missing mandatory information requestType for actionType:%q", action.ActionType)
 	}
+
+	userName := action.Data[actionDataUserName]
 
 	var cloudPlacement dam.CloudPlacement
 	var hpcPlacement dam.HPCPlacement
@@ -143,7 +153,6 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 			events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
 				"Component %s received from Dynamic Allocator Module HPC placement results %+v",
 				actionData.nodeName, hpcPlacement)
-
 		}
 
 	default:
@@ -159,7 +168,8 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 	case status == dam.RequestStatusOK:
 		requestStatus = requestStatusCompleted
 	default:
-		return true, errors.Errorf("Unexpected status :%q", status)
+		requestStatus = requestStatusFailed
+		errorMessage = status
 	}
 
 	previousRequestStatus, err := deployments.GetInstanceStateString(ctx, deploymentID, actionData.nodeName, "0")
@@ -173,11 +183,11 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 		// job has been done successfully : unregister monitoring
 		deregister = true
 		// Update locations
-		err = o.setLocations(ctx, cfg, deploymentID, actionData.nodeName, cloudPlacement, hpcPlacement)
+		err = o.setLocations(ctx, cfg, deploymentID, actionData.nodeName, userName, cloudPlacement, hpcPlacement)
 	case requestStatusPending, requestStatusRunning:
 		// job's still running or its state is about to be set definitively: monitoring is keeping on (deregister stays false)
 	default:
-		// Other cases as FAILED, CANCELED : error is return with job state and job info is logged
+		// Other cases are failures
 		deregister = true
 		// Log event containing all the slurm information
 
@@ -213,7 +223,7 @@ func (o *ActionOperator) getActionData(action *prov.Action) (*actionData, error)
 	return actionData, nil
 }
 
-func (o *ActionOperator) setLocations(ctx context.Context, cfg config.Configuration, deploymentID, nodeName string,
+func (o *ActionOperator) setLocations(ctx context.Context, cfg config.Configuration, deploymentID, nodeName, userName string,
 	cloudPlacement dam.CloudPlacement, hpcPlacement dam.HPCPlacement) error {
 
 	var err error
@@ -239,7 +249,7 @@ func (o *ActionOperator) setLocations(ctx context.Context, cfg config.Configurat
 		return err
 	}
 	// Assign locations to cloud instances
-	err = o.assignCloudLocations(ctx, deploymentID, cloudReqs, cloudLocations)
+	err = o.assignCloudLocations(ctx, cfg, deploymentID, userName, cloudReqs, cloudLocations)
 	if err != nil {
 		return err
 	}
@@ -275,12 +285,18 @@ func (o *ActionOperator) computeLocations(ctx context.Context, cfg config.Config
 			user = ""
 		}
 
+		location, err := findCloudLocation(ctx, cfg, cloudPlacement.Message[resIndex], deploymentID)
+		if err != nil {
+			return cloudLocations, hpcLocations, err
+		}
+
 		cloudLocations[nodeName] = CloudLocation{
-			Name:           cloudPlacement.Message[resIndex].Location + "_openstack",
+			Name:           location,
 			Flavor:         cloudPlacement.Message[resIndex].Flavor,
 			ImageID:        cloudPlacement.Message[resIndex].ImageID,
 			FloatingIPPool: cloudPlacement.Message[resIndex].FloatingIPPool,
 			User:           user,
+			HEAppEURL:      strings.TrimSpace(cloudPlacement.Message[resIndex].HEAppEURL),
 		}
 		if resIndex < len(cloudPlacement.Message)-1 {
 			resIndex = resIndex + 1
@@ -317,7 +333,7 @@ func (o *ActionOperator) computeLocations(ctx context.Context, cfg config.Config
 		tasksLocations := map[string]TaskLocation{
 			jobSpec.Tasks[0].Name: taskLocation,
 		}
-		location, err := findHEAppELocation(ctx, cfg, hpcPlacement.Message[resIndex].URL,
+		location, err := findHEAppELocation(ctx, cfg, strings.TrimSpace(hpcPlacement.Message[resIndex].URL),
 			hpcPlacement.Message[resIndex].Location, deploymentID)
 		if err != nil {
 			return cloudLocations, hpcLocations, err
@@ -380,6 +396,7 @@ func findHEAppELocation(ctx context.Context, cfg config.Configuration, url, site
 			sameTypeLocationConfig = locationConfig
 			if url == locationConfig.Properties.GetString("url") {
 				locationName = locationConfig.Name
+				break
 			}
 			// Convention: the first section of location identify the datacenter
 			siteID := strings.ToLower(strings.SplitN(locationConfig.Name, "_", 2)[0])
@@ -396,13 +413,13 @@ func findHEAppELocation(ctx context.Context, cfg config.Configuration, url, site
 	var newLocationConfig locations.LocationConfiguration
 	if sameSiteLocationConfig.Name != "" {
 		newLocationConfig = sameSiteLocationConfig
-		newLocationConfig.Name = sameSiteLocationConfig.Name + "-" + path.Base(url)
 		newLocationConfig.Properties.Set("url", url)
 	} else if sameTypeLocationConfig.Name != "" {
 		newLocationConfig = sameTypeLocationConfig
-		newLocationConfig.Name = site + "_" + path.Base(url)
+		newLocationConfig.Name = site + "_heappe_" + path.Base(url)
 		newLocationConfig.Properties.Set("url", url)
 	}
+	newLocationConfig.Name = site + "_heappe_" + path.Base(url)
 
 	if newLocationConfig.Name != "" {
 		// Adding a new location
@@ -417,10 +434,75 @@ func findHEAppELocation(ctx context.Context, cfg config.Configuration, url, site
 	return locationName, errors.Errorf("Found no HEAppE location")
 
 }
-func (o *ActionOperator) assignCloudLocations(ctx context.Context, deploymentID string,
+
+func findCloudLocation(ctx context.Context, cfg config.Configuration, cloudLocation dam.CloudLocation, deploymentID string) (string, error) {
+
+	var locationName string
+	locationMgr, err := locations.GetManager(cfg)
+	if err != nil {
+		return locationName, err
+	}
+
+	// TODO: remove this temporary code
+	if cloudLocation.ProjectName == "" {
+		log.Printf("TODO: Cloud Location project name not yet defined, using cloud location lrz_openstack\n")
+		return "lrz_openstack", nil
+	}
+
+	locConfigs, err := locationMgr.GetLocations()
+	if err != nil {
+		return locationName, err
+	}
+
+	var sameSiteLocationConfig locations.LocationConfiguration
+	for _, locationConfig := range locConfigs {
+		if locationConfig.Type == openstackInfrastructureType {
+			// Convention: the first section of location identify the datacenter
+			siteID := strings.ToLower(strings.SplitN(locationConfig.Name, "_", 2)[0])
+			if siteID == cloudLocation.Location {
+				sameSiteLocationConfig = locationConfig
+				if locationConfig.Properties.GetString("project_name") == cloudLocation.ProjectName {
+					locationName = locationConfig.Name
+					break
+				}
+			}
+		}
+	}
+
+	if locationName != "" {
+		return locationName, err
+	}
+
+	var newLocationConfig locations.LocationConfiguration
+	if sameSiteLocationConfig.Name != "" {
+		newLocationConfig = sameSiteLocationConfig
+	} else {
+		return "", errors.Errorf("Cannot create new OpenStack location, found no existing OpenStack location existing yet on %s", cloudLocation.ProjectName)
+	}
+	newLocationConfig.Name = cloudLocation.Location + "_openstack_" + cloudLocation.ProjectName
+	newLocationConfig.Properties.Set("project_name", cloudLocation.ProjectName)
+	newLocationConfig.Properties.Set("user_name", "")
+	newLocationConfig.Properties.Set("password", "")
+	newLocationConfig.Properties.Set("project_id", "")
+	if cloudLocation.PrivateNetwork != "" {
+		newLocationConfig.Properties.Set("private_network_name", cloudLocation.PrivateNetwork)
+	}
+
+	// Adding a new location
+	events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
+		"Creating new OpenStack location %s", newLocationConfig.Name)
+	log.Printf("Creating new OpenStack location %s", newLocationConfig.Name)
+	err = locationMgr.CreateLocation(newLocationConfig)
+
+	return newLocationConfig.Name, err
+
+}
+
+func (o *ActionOperator) assignCloudLocations(ctx context.Context, cfg config.Configuration, deploymentID, userName string,
 	requirements map[string]CloudRequirement, locations map[string]CloudLocation) error {
 
 	var err error
+	cloudLocationCredentials := make(map[string]heappe.OpenStackCredentials)
 	for nodeName, req := range requirements {
 		location, ok := locations[nodeName]
 		if !ok {
@@ -437,7 +519,7 @@ func (o *ActionOperator) assignCloudLocations(ctx context.Context, deploymentID 
 		}
 		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
 			"Location for %s: %s", nodeName, location.Name)
-		err = o.setCloudLocation(ctx, deploymentID, nodeName, req, location)
+		err = o.setCloudLocation(ctx, cfg, deploymentID, nodeName, userName, req, location, cloudLocationCredentials)
 
 	}
 	return err
@@ -470,18 +552,14 @@ func (o *ActionOperator) assignHPCLocations(ctx context.Context, deploymentID st
 }
 
 // setCloudLocation updates the deployment description of a compute instance for a new location
-func (o *ActionOperator) setCloudLocation(ctx context.Context, deploymentID, nodeName string, requirement CloudRequirement, location CloudLocation) error {
+func (o *ActionOperator) setCloudLocation(ctx context.Context, cfg config.Configuration, deploymentID, nodeName, userName string,
+	requirement CloudRequirement, location CloudLocation, cloudLocationCreds map[string]heappe.OpenStackCredentials) error {
 
 	nodeTemplate, err := getStoredNodeTemplate(ctx, deploymentID, nodeName)
 	if err != nil {
 		return err
 	}
 
-	// Add the new location in this node template metadata
-	if nodeTemplate.Metadata == nil {
-		nodeTemplate.Metadata = make(map[string]string)
-	}
-	nodeTemplate.Metadata[tosca.MetadataLocationNameKey] = location.Name
 	// Update the flavor
 	flavorVal := tosca.ValueAssignment{
 		Type:  tosca.ValueAssignmentLiteral,
@@ -500,16 +578,51 @@ func (o *ActionOperator) setCloudLocation(ctx context.Context, deploymentID, nod
 		Type:  tosca.ValueAssignmentMap,
 		Value: bootVolume,
 	}
+	if !strings.HasPrefix(location.Name, "it4i_") {
+		// no burst buffer except possibly on it4i
+		bootVolume["volume_type"] = ""
+	}
 	nodeTemplate.Properties["boot_volume"] = &volumeVal
 
-	// Update the user in credentials
+	// Get a Cloud Service client and token
+	cloudClient, cloudToken, err := getCloudClientToken(ctx, cfg, location.Name, location.HEAppEURL, userName, deploymentID)
+	if err != nil {
+		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelERROR, deploymentID).Registerf(
+			"Failed to get token for cloud instance %s, error %s", location.Name, err.Error())
+		log.Printf("TODO: should fail on getting cloud client token error %v\n", err)
+		// TODO remove this code changing the location to use a service account
+		site := strings.ToLower(strings.SplitN(location.Name, "_", 2)[0])
+		if site == "it4i" {
+			location.Name = "it4i_openstack"
+		} else {
+			location.Name = "lrz_openstack"
+		}
+		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelERROR, deploymentID).Registerf(
+			"Changing openstack location to use %s with service account", location.Name)
+		log.Printf("Changing openstack location to use %s with service account\n", location.Name)
+		// TODO: uncomment this
+		// return err
+	}
+
+	// Add the new location in this node template metadata
+	if nodeTemplate.Metadata == nil {
+		nodeTemplate.Metadata = make(map[string]string)
+	}
+	nodeTemplate.Metadata[tosca.MetadataLocationNameKey] = location.Name
+	nodeTemplate.Metadata[metadataCloudCredentialsURLKey] = location.HEAppEURL
+	nodeTemplate.Metadata["token"] = cloudToken
+	credsID, credsSecret := cloudClient.GetCreds()
+	nodeTemplate.Metadata["application_credential_id"] = credsID
+	nodeTemplate.Metadata["application_credential_secret"] = credsSecret
+
+	// Update credentials for the node
 	val, ok = nodeTemplate.Capabilities["endpoint"].Properties["credentials"]
 	if !ok {
 		return errors.Errorf("Found no credentials defined for node %s in deployment %s", nodeName, deploymentID)
 	}
 
+	creds := val.GetMap()
 	if location.User != "" {
-		creds := val.GetMap()
 		creds["user"] = location.User
 		credsVal := tosca.ValueAssignment{
 			Type:  tosca.ValueAssignmentMap,
@@ -517,14 +630,34 @@ func (o *ActionOperator) setCloudLocation(ctx context.Context, deploymentID, nod
 		}
 		nodeTemplate.Capabilities["endpoint"].Properties["credentials"] = &credsVal
 	}
-
 	// Location is now changed for this node template, storing it
 	err = storeNodeTemplate(ctx, deploymentID, nodeName, nodeTemplate)
 	if err != nil {
 		return err
 	}
 
-	// Update the associated Floating IP Node location
+	// Add the specified keypair to the Cloud Service if needed
+	var keypairPath string
+	keysVal, ok := creds["keys"]
+	if !ok {
+		log.Printf("Found no credentials keys defined in %v", creds)
+	} else {
+		keys, ok := keysVal.(map[string]interface{})
+		if !ok {
+			log.Printf("Expected a map for credentials keys, got %+v %T", keysVal, keysVal)
+		} else {
+			keypairPath = keys["0"].(string)
+		}
+	}
+
+	log.Debugf("keypair path: %s\n", keypairPath)
+	if cloudToken != "" {
+		err = cloudClient.AddKeyPair(keypairPath)
+		if err != nil {
+			return errors.Wrapf(err, "Failed to add keypair for %s", keypairPath)
+		}
+	}
+	// Update the associated Floating IP Node location and token
 	var floatingIPNodeName string
 	for _, nodeReq := range nodeTemplate.Requirements {
 		for _, reqAssignment := range nodeReq {
@@ -549,6 +682,9 @@ func (o *ActionOperator) setCloudLocation(ctx context.Context, deploymentID, nod
 		fipNodeTemplate.Metadata = make(map[string]string)
 	}
 	fipNodeTemplate.Metadata[tosca.MetadataLocationNameKey] = location.Name
+	fipNodeTemplate.Metadata["token"] = cloudToken
+	fipNodeTemplate.Metadata["application_credential_id"] = credsID
+	fipNodeTemplate.Metadata["application_credential_secret"] = credsSecret
 
 	// Update as well the Floating IP pool
 	poolVal := tosca.ValueAssignment{
@@ -567,6 +703,90 @@ func (o *ActionOperator) setCloudLocation(ctx context.Context, deploymentID, nod
 		"Floating IP pool is %s for %s in deployment %s", location.FloatingIPPool, floatingIPNodeName, deploymentID)
 
 	return err
+}
+
+// getCloudClientToken gets a Cloud service client and a token for this client
+func getCloudClientToken(ctx context.Context,
+	cfg config.Configuration, cloudLocationName, heappeURL, userName, deploymentID string) (cloud.Client, string, error) {
+
+	var cloudClient cloud.Client
+
+	// Get a Cloud Service client
+	site := strings.ToLower(strings.SplitN(cloudLocationName, "_", 2)[0])
+	var getCredsFunc cloud.GetApplicationCredentialsFunc = func() (string, string, error) {
+		credsID, credsSecret, err := getApplicationCredentialsFromHEAppE(ctx, cfg, heappeURL, site, userName, deploymentID)
+		if err != nil {
+			events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelERROR, deploymentID).Registerf(
+				"ERROR: Failed to get application credentials from %s: %v,", heappeURL, err)
+			log.Printf("ERROR: Failed to get application credentials from %s: %v\n", heappeURL, err)
+		}
+		return credsID, credsSecret, err
+	}
+	cloudURL, err := getCloudLocationURL(ctx, cfg, cloudLocationName)
+	if err != nil {
+		return cloudClient, "", err
+	}
+	cloudClient, err = cloud.GetClient(cloudURL, getCredsFunc)
+	if err != nil {
+		return cloudClient, "", err
+	}
+	cloudToken := cloudClient.GetToken()
+	return cloudClient, cloudToken, err
+}
+
+// getApplicationCredentialsFromHEAppE updates the deployment description of a compute instance that has to be skipped
+func getApplicationCredentialsFromHEAppE(ctx context.Context,
+	cfg config.Configuration, heappeURL, site, userName, deploymentID string) (string, string, error) {
+
+	var credsID, credsSecret string
+	locationName, err := findHEAppELocation(ctx, cfg, heappeURL, site, deploymentID)
+	if err != nil {
+		return credsID, credsSecret, err
+	}
+
+	locationMgr, err := locations.GetManager(cfg)
+	if err != nil {
+		return credsID, credsSecret, err
+	}
+
+	locationProps, err := locationMgr.GetLocationProperties(locationName, heappeInfrastructureType)
+	if err != nil {
+		return credsID, credsSecret, err
+	}
+
+	aaiClient := getAAIClient(deploymentID, locationProps)
+	accessToken, err := aaiClient.GetAccessToken()
+	if err != nil {
+		return credsID, credsSecret, err
+	}
+	var refreshTokenFunc heappe.RefreshTokenFunc = func() (string, error) {
+		log.Printf("HEAppE requests to refresh token for deployment %s\n", deploymentID)
+		accessToken, _, err := aaiClient.RefreshToken(ctx)
+		return accessToken, err
+	}
+
+	heappeClient, err := heappe.GetClient(locationProps, userName, accessToken, refreshTokenFunc)
+	if err != nil {
+		return credsID, credsSecret, err
+	}
+	return heappeClient.GetOpenStackCredentials()
+}
+
+// getCloudLocationURL returns the URL of an OpenStack location
+func getCloudLocationURL(ctx context.Context,
+	cfg config.Configuration, locationName string) (string, error) {
+
+	locationMgr, err := locations.GetManager(cfg)
+	if err != nil {
+		return "", err
+	}
+
+	locationProps, err := locationMgr.GetLocationProperties(locationName, openstackInfrastructureType)
+	if err != nil {
+		return "", err
+	}
+
+	return locationProps.GetString("auth_url"), err
 }
 
 // setCloudLocationSkipped updates the deployment description of a compute instance that has to be skipped
