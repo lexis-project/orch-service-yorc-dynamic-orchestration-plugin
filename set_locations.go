@@ -32,7 +32,6 @@ import (
 	"github.com/ystia/yorc/v4/config"
 	"github.com/ystia/yorc/v4/deployments"
 	"github.com/ystia/yorc/v4/events"
-	"github.com/ystia/yorc/v4/log"
 	"github.com/ystia/yorc/v4/prov"
 	"github.com/ystia/yorc/v4/prov/operations"
 	"github.com/ystia/yorc/v4/tosca"
@@ -361,13 +360,7 @@ func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Con
 		}
 
 		if submittedReq.Status != dam.RequestStatusOK {
-			// TODO: remove this
-			if strings.Contains(strings.ToLower(damCloudReq.OSVersion), "windows") {
-				submittedReq.RequestID = "TestADMSRequestID"
-				log.Printf("TODO: remove this code workaround for DAM response %s for windows request %v\n", string(reqVal), submittedReq)
-			} else {
-				return errors.Errorf("Got response %s for Cloud placement request %v", string(reqVal), submittedReq)
-			}
+			return errors.Errorf("Got response %s for Cloud placement request %v", string(reqVal), submittedReq)
 		}
 		requestID = submittedReq.RequestID
 		requestType = requestTypeCloud
@@ -857,7 +850,12 @@ func getOSVersion(req CloudRequirement) string {
 		return req.ImageName
 	}
 	if req.OSType == "windows" {
-		return req.OSType
+		osVersion = req.OSType
+		// Specific distribution can be specified including third party software
+		if req.OSDistribution != "" {
+			osVersion = req.OSDistribution
+		}
+		return osVersion
 	}
 	switch req.OSDistribution {
 	case "centos":
