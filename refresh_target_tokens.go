@@ -144,9 +144,7 @@ func (r *RefreshTargetTokens) refreshComputeInstanceToken(ctx context.Context, t
 	if err != nil {
 		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelERROR, r.DeploymentID).Registerf(
 			"Failed to get token for cloud instance %s, error %s", locationName, err.Error())
-		log.Printf("TODO: should fail on getting cloud client token error %v", err)
-		// TODO: uncomment this
-		// return err
+		return err
 	}
 
 	// Update token for the node
