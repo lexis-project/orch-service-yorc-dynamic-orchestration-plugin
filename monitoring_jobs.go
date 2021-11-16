@@ -509,7 +509,7 @@ func (o *ActionOperator) assignCloudLocations(ctx context.Context, cfg config.Co
 			if req.Optional {
 				events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
 					"No available location for optional compute instance %s in deployment %s", nodeName, deploymentID)
-				err = o.setCloudLocationSkipped(ctx, nodeName)
+				err = o.setCloudLocationSkipped(ctx, deploymentID, nodeName)
 				if err != nil {
 					return err
 				}
@@ -534,7 +534,7 @@ func (o *ActionOperator) assignHPCLocations(ctx context.Context, deploymentID st
 			if req.Optional {
 				events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
 					"No available location for optional compute instance %s in deployment %s", nodeName, deploymentID)
-				err = o.setHPCLocationSkipped(ctx, nodeName)
+				err = o.setHPCLocationSkipped(ctx, deploymentID, nodeName)
 				if err != nil {
 					return err
 				}
@@ -790,7 +790,7 @@ func getCloudLocationURL(ctx context.Context,
 }
 
 // setCloudLocationSkipped updates the deployment description of a compute instance that has to be skipped
-func (o *ActionOperator) setCloudLocationSkipped(ctx context.Context, nodeName string) error {
+func (o *ActionOperator) setCloudLocationSkipped(ctx context.Context, deploymentID, nodeName string) error {
 	return errors.Errorf("Skipping a cloud compute instance without location not yet implemented")
 }
 
@@ -863,8 +863,17 @@ func (o *ActionOperator) setHPCLocation(ctx context.Context, deploymentID, nodeN
 }
 
 // setHPCLocationSkipped updates the deployment description of a compute instance that has to be skipped
-func (o *ActionOperator) setHPCLocationSkipped(ctx context.Context, nodeName string) error {
-	return errors.Errorf("Skipping a HPC job without location not yet implemented")
+func (o *ActionOperator) setHPCLocationSkipped(ctx context.Context, deploymentID, nodeName string) error {
+	nodeTemplate, err := getStoredNodeTemplate(ctx, deploymentID, nodeName)
+	if err != nil {
+		return err
+	}
+	if nodeTemplate.Metadata == nil {
+		nodeTemplate.Metadata = make(map[string]string)
+	}
+	nodeTemplate.Metadata[tosca.MetadataLocationNameKey] = "SKIPPED"
+	err = storeNodeTemplate(ctx, deploymentID, nodeName, nodeTemplate)
+	return err
 }
 
 // getStoredNodeTemplate returns the description of a node stored by Yorc
