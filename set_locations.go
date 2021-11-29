@@ -121,7 +121,7 @@ type JobSpecification struct {
 // HPCRequirement holds a HPC job requirements
 type HPCRequirement struct {
 	*JobSpecification
-	Optional bool `json:"optional,omitempty"`
+	Optional bool `json:"optional,string"`
 }
 
 // CloudLocation holds properties of a cloud location to use
