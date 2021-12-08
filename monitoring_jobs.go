@@ -323,9 +323,25 @@ func (o *ActionOperator) computeLocations(ctx context.Context, cfg config.Config
 	if len(hpcPlacement.Message) == 0 && len(hpcReqs) > 0 {
 		return cloudLocations, hpcLocations, errors.Errorf("%s Found no HPC location for HEAppE job to submit", nodeName)
 	}
-	resIndex = 0
-	for nodeName, jobSpec := range hpcReqs {
 
+	// Placing first required jobs
+	mandatoryReqs := make(map[string]HPCRequirement)
+	optionalReqs := make(map[string]HPCRequirement)
+	for nodeName, jobSpec := range hpcReqs {
+		if jobSpec.Optional {
+			optionalReqs[nodeName] = jobSpec
+		} else {
+			mandatoryReqs[nodeName] = jobSpec
+
+		}
+	}
+
+	resIndex = 0
+	for nodeName, jobSpec := range mandatoryReqs {
+
+		if resIndex >= len(hpcPlacement.Message) {
+			break
+		}
 		taskLocation := TaskLocation{
 			NodeTypeID:        hpcPlacement.Message[resIndex].TaskLocations[0].ClusterNodeTypeID,
 			CommandTemplateID: hpcPlacement.Message[resIndex].TaskLocations[0].CommandTemplateID,
@@ -345,10 +361,32 @@ func (o *ActionOperator) computeLocations(ctx context.Context, cfg config.Config
 			TasksLocation: tasksLocations,
 		}
 
-		if resIndex < len(hpcPlacement.Message)-1 {
-			resIndex = resIndex + 1
-		} else {
-			resIndex = 0
+		resIndex = resIndex + 1
+	}
+
+	// Place then optional jobs
+	for nodeName, jobSpec := range optionalReqs {
+
+		if resIndex >= len(hpcPlacement.Message) {
+			break
+		}
+		taskLocation := TaskLocation{
+			NodeTypeID:        hpcPlacement.Message[resIndex].TaskLocations[0].ClusterNodeTypeID,
+			CommandTemplateID: hpcPlacement.Message[resIndex].TaskLocations[0].CommandTemplateID,
+		}
+		tasksLocations := map[string]TaskLocation{
+			jobSpec.Tasks[0].Name: taskLocation,
+		}
+		location, err := findHEAppELocation(ctx, cfg, strings.TrimSpace(hpcPlacement.Message[resIndex].URL),
+			hpcPlacement.Message[resIndex].Location, deploymentID)
+		if err != nil {
+			return cloudLocations, hpcLocations, err
+		}
+		hpcLocations[nodeName] = HPCLocation{
+			Name:          location,
+			Project:       hpcPlacement.Message[resIndex].Project,
+			ClusterID:     hpcPlacement.Message[resIndex].ClusterID,
+			TasksLocation: tasksLocations,
 		}
 	}
 
@@ -533,13 +571,11 @@ func (o *ActionOperator) assignHPCLocations(ctx context.Context, deploymentID st
 		if !ok {
 			if req.Optional {
 				events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
-					"No available location for optional compute instance %s in deployment %s", nodeName, deploymentID)
+					"No available location for optional HPC job %s in deployment %s", nodeName, deploymentID)
 				err = o.setHPCLocationSkipped(ctx, deploymentID, nodeName)
-				if err != nil {
-					return err
-				}
+				return err
 			} else {
-				return errors.Errorf("No available location found for compute instance %s in deployment %s", nodeName, deploymentID)
+				return errors.Errorf("No available location found for HPC job %s in deployment %s", nodeName, deploymentID)
 			}
 		}
 		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
