@@ -32,29 +32,33 @@ import (
 	"github.com/ystia/yorc/v4/locations"
 	"github.com/ystia/yorc/v4/log"
 	"github.com/ystia/yorc/v4/prov"
+	"github.com/ystia/yorc/v4/prov/scheduling"
 	"github.com/ystia/yorc/v4/storage"
 	storageTypes "github.com/ystia/yorc/v4/storage/types"
 	"github.com/ystia/yorc/v4/tosca"
 )
 
 const (
-	requestIDConsulAttribute   = "request_id"
-	requestTypeConsulAttribute = "request_type"
-	requestTypeCloud           = "cloud"
-	requestTypeHPC             = "hpc"
-	requestStatusPending       = "PENDING"
-	requestStatusRunning       = "RUNNING"
-	requestStatusCompleted     = "COMPLETED"
-	requestStatusFailed        = "FAILED"
+	requestIDConsulAttribute    = "request_id"
+	requestTypeConsulAttribute  = "request_type"
+	cloudRequestConsulAttribute = "cloud_request"
+	requestTypeCloud            = "cloud"
+	requestTypeHPC              = "hpc"
+	requestStatusPending        = "PENDING"
+	requestStatusRunning        = "RUNNING"
+	requestStatusCompleted      = "COMPLETED"
+	requestStatusFailed         = "FAILED"
+	requestStatusTryAgain       = "try again"
 
 	// computeBestLocationAction is the action of computing the best location
 	computeBestLocationAction = "compute-best-location"
 
-	actionDataNodeName    = "nodeName"
-	actionDataRequestID   = "requestID"
-	actionDataRequestType = "requestType"
-	actionDataTaskID      = "taskID"
-	actionDataUserName    = "user"
+	actionDataNodeName     = "nodeName"
+	actionDataRequestID    = "requestID"
+	actionDataRequestType  = "requestType"
+	actionDataCloudRequest = "cloudRequest"
+	actionDataTaskID       = "taskID"
+	actionDataUserName     = "user"
 
 	// Key used in a Cloud Compute instance metadata
 	// to store the URL of the HEAppE instance
@@ -101,12 +105,26 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 	if !ok {
 		return true, errors.Errorf("Missing mandatory information requestType for actionType:%q", action.ActionType)
 	}
-
+	/*
+		if requestType == requestTypeCloud {
+			// The initial request ID may have change if no cloud location was available
+			// and a request was resubmitted, getting the stored request ID to get the ID of the latest request
+			val, err := deployments.GetInstanceAttributeValue(ctx, deploymentID, actionData.nodeName, "0", requestIDConsulAttribute)
+			if err != nil {
+				return true, errors.Wrapf(err, "Failed to get request ID for deployment %s node %s", deploymentID, actionData.nodeName)
+			} else if val == nil {
+				return true, errors.Errorf("Found no request id for deployment %s node %s", deploymentID, actionData.nodeName)
+			}
+			requestID = val.RawString()
+		}
+	*/
 	userName := action.Data[actionDataUserName]
 
 	var cloudPlacement dam.CloudPlacement
 	var hpcPlacement dam.HPCPlacement
 	var status string
+	var client dam.Client
+	var accessToken string
 	switch action.ActionType {
 	case computeBestLocationAction:
 		locationMgr, err := locations.GetManager(cfg)
@@ -126,12 +144,12 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 			accessToken, _, err := refreshToken(ctx, locationProps, deploymentID)
 			return accessToken, err
 		}
-		client, err := dam.GetClient(locationProps, refreshTokenFunc)
+		client, err = dam.GetClient(locationProps, refreshTokenFunc)
 		if err != nil {
 			return true, err
 		}
 		aaiClient := getAAIClient(deploymentID, locationProps)
-		accessToken, err := aaiClient.GetAccessToken()
+		accessToken, err = aaiClient.GetAccessToken()
 		if err != nil {
 			return true, err
 		}
@@ -188,12 +206,54 @@ func (o *ActionOperator) monitorJob(ctx context.Context, cfg config.Configuratio
 		// job's still running or its state is about to be set definitively: monitoring is keeping on (deregister stays false)
 	default:
 		// Other cases are failures
-		deregister = true
-		// Log event containing all the slurm information
-
+		// Log event with details
 		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelERROR, deploymentID).RegisterAsString(fmt.Sprintf("request %s status: %s, reason: %s", requestID, requestStatus, errorMessage))
 		// Error to be returned
 		err = errors.Errorf("Request ID %s finished unsuccessfully with status: %s, reason: %s", requestID, requestStatus, errorMessage)
+
+		if requestType == requestTypeCloud && strings.Contains(strings.ToLower(status), requestStatusTryAgain) {
+			// No cloud resource available for the moment, retrying the request
+			reqStr, ok := action.Data[actionDataCloudRequest]
+			if !ok {
+				return true, errors.Errorf("Missing mandatory information about the cloud request to retry for actionType:%q", action.ActionType)
+			}
+			var damCloudReq dam.CloudRequirement
+			err = json.Unmarshal([]byte(reqStr), &damCloudReq)
+			if err != nil {
+				return true, errors.Wrapf(err, "Failed to unmarshal cloud request from string %s", reqStr)
+			}
+
+			events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
+				"No cloud location available, %s resubmitting to Dynamic Allocator Module cloud placement request %+s",
+				actionData.nodeName, reqStr)
+			submittedReq, err := client.SubmitCloudPlacementRequest(accessToken, damCloudReq)
+			if err != nil {
+				return true, errors.Wrapf(err, "Failed to submit cloud placement request %s", reqStr)
+			}
+			if submittedReq.Status != dam.RequestStatusOK {
+				return true, errors.Errorf("Got response %s for Cloud placement request %v", reqStr, submittedReq)
+			}
+			events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
+				"New request submitted to Dynamic Allocator Module by %s: %v",
+				actionData.nodeName, submittedReq)
+			requestID = submittedReq.RequestID
+			requestStatus = requestStatusRunning
+
+			// Store the new request id
+			consulClient, err := cfg.GetConsulClient()
+			if err != nil {
+				return true, errors.Wrapf(err, "Failed to get consul client")
+			}
+			err = scheduling.UpdateActionData(consulClient, action.ID, actionDataRequestID, requestID)
+			if err != nil {
+				return true, errors.Wrapf(err, "Request %s submitted, but failed to store this request id", requestID)
+			}
+
+		} else {
+			// fatal failure
+			deregister = true
+		}
+
 	}
 
 	// Print state change
@@ -323,9 +383,25 @@ func (o *ActionOperator) computeLocations(ctx context.Context, cfg config.Config
 	if len(hpcPlacement.Message) == 0 && len(hpcReqs) > 0 {
 		return cloudLocations, hpcLocations, errors.Errorf("%s Found no HPC location for HEAppE job to submit", nodeName)
 	}
-	resIndex = 0
-	for nodeName, jobSpec := range hpcReqs {
 
+	// Placing first required jobs
+	mandatoryReqs := make(map[string]HPCRequirement)
+	optionalReqs := make(map[string]HPCRequirement)
+	for nodeName, jobSpec := range hpcReqs {
+		if jobSpec.Optional {
+			optionalReqs[nodeName] = jobSpec
+		} else {
+			mandatoryReqs[nodeName] = jobSpec
+
+		}
+	}
+
+	resIndex = 0
+	for nodeName, jobSpec := range mandatoryReqs {
+
+		if resIndex >= len(hpcPlacement.Message) {
+			break
+		}
 		taskLocation := TaskLocation{
 			NodeTypeID:        hpcPlacement.Message[resIndex].TaskLocations[0].ClusterNodeTypeID,
 			CommandTemplateID: hpcPlacement.Message[resIndex].TaskLocations[0].CommandTemplateID,
@@ -345,10 +421,32 @@ func (o *ActionOperator) computeLocations(ctx context.Context, cfg config.Config
 			TasksLocation: tasksLocations,
 		}
 
-		if resIndex < len(hpcPlacement.Message)-1 {
-			resIndex = resIndex + 1
-		} else {
-			resIndex = 0
+		resIndex = resIndex + 1
+	}
+
+	// Place then optional jobs
+	for nodeName, jobSpec := range optionalReqs {
+
+		if resIndex >= len(hpcPlacement.Message) {
+			break
+		}
+		taskLocation := TaskLocation{
+			NodeTypeID:        hpcPlacement.Message[resIndex].TaskLocations[0].ClusterNodeTypeID,
+			CommandTemplateID: hpcPlacement.Message[resIndex].TaskLocations[0].CommandTemplateID,
+		}
+		tasksLocations := map[string]TaskLocation{
+			jobSpec.Tasks[0].Name: taskLocation,
+		}
+		location, err := findHEAppELocation(ctx, cfg, strings.TrimSpace(hpcPlacement.Message[resIndex].URL),
+			hpcPlacement.Message[resIndex].Location, deploymentID)
+		if err != nil {
+			return cloudLocations, hpcLocations, err
+		}
+		hpcLocations[nodeName] = HPCLocation{
+			Name:          location,
+			Project:       hpcPlacement.Message[resIndex].Project,
+			ClusterID:     hpcPlacement.Message[resIndex].ClusterID,
+			TasksLocation: tasksLocations,
 		}
 	}
 
@@ -509,7 +607,7 @@ func (o *ActionOperator) assignCloudLocations(ctx context.Context, cfg config.Co
 			if req.Optional {
 				events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
 					"No available location for optional compute instance %s in deployment %s", nodeName, deploymentID)
-				err = o.setCloudLocationSkipped(ctx, nodeName)
+				err = o.setCloudLocationSkipped(ctx, deploymentID, nodeName)
 				if err != nil {
 					return err
 				}
@@ -533,13 +631,11 @@ func (o *ActionOperator) assignHPCLocations(ctx context.Context, deploymentID st
 		if !ok {
 			if req.Optional {
 				events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
-					"No available location for optional compute instance %s in deployment %s", nodeName, deploymentID)
-				err = o.setHPCLocationSkipped(ctx, nodeName)
-				if err != nil {
-					return err
-				}
+					"No available location for optional HPC job %s in deployment %s", nodeName, deploymentID)
+				err = o.setHPCLocationSkipped(ctx, deploymentID, nodeName)
+				return err
 			} else {
-				return errors.Errorf("No available location found for compute instance %s in deployment %s", nodeName, deploymentID)
+				return errors.Errorf("No available location found for HPC job %s in deployment %s", nodeName, deploymentID)
 			}
 		}
 		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, deploymentID).Registerf(
@@ -790,7 +886,7 @@ func getCloudLocationURL(ctx context.Context,
 }
 
 // setCloudLocationSkipped updates the deployment description of a compute instance that has to be skipped
-func (o *ActionOperator) setCloudLocationSkipped(ctx context.Context, nodeName string) error {
+func (o *ActionOperator) setCloudLocationSkipped(ctx context.Context, deploymentID, nodeName string) error {
 	return errors.Errorf("Skipping a cloud compute instance without location not yet implemented")
 }
 
@@ -863,8 +959,17 @@ func (o *ActionOperator) setHPCLocation(ctx context.Context, deploymentID, nodeN
 }
 
 // setHPCLocationSkipped updates the deployment description of a compute instance that has to be skipped
-func (o *ActionOperator) setHPCLocationSkipped(ctx context.Context, nodeName string) error {
-	return errors.Errorf("Skipping a HPC job without location not yet implemented")
+func (o *ActionOperator) setHPCLocationSkipped(ctx context.Context, deploymentID, nodeName string) error {
+	nodeTemplate, err := getStoredNodeTemplate(ctx, deploymentID, nodeName)
+	if err != nil {
+		return err
+	}
+	if nodeTemplate.Metadata == nil {
+		nodeTemplate.Metadata = make(map[string]string)
+	}
+	nodeTemplate.Metadata[tosca.MetadataLocationNameKey] = "SKIPPED"
+	err = storeNodeTemplate(ctx, deploymentID, nodeName, nodeTemplate)
+	return err
 }
 
 // getStoredNodeTemplate returns the description of a node stored by Yorc

@@ -29,7 +29,8 @@ const (
 	// RequestStatusOK is the stauts of a successful request
 	RequestStatusOK = "ok"
 
-	invalidTokenError = "Invalid Token"
+	invalidTokenError  = "Invalid Token"
+	notActiveTokenBody = "not active"
 
 	evaluateCloudEndpoint  = "/evaluate/machines?type=cloud"
 	evaluateHPCEndpoint    = "/evaluate/machines?type=hpc"

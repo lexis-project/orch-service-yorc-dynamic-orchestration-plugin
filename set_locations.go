@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/ystia/yorc/v4/config"
 	"github.com/ystia/yorc/v4/deployments"
 	"github.com/ystia/yorc/v4/events"
+	"github.com/ystia/yorc/v4/helper/consulutil"
 	"github.com/ystia/yorc/v4/prov"
 	"github.com/ystia/yorc/v4/prov/operations"
 	"github.com/ystia/yorc/v4/tosca"
@@ -121,7 +123,7 @@ type JobSpecification struct {
 // HPCRequirement holds a HPC job requirements
 type HPCRequirement struct {
 	*JobSpecification
-	Optional bool `json:"optional,omitempty"`
+	Optional bool `json:"optional,string"`
 }
 
 // CloudLocation holds properties of a cloud location to use
@@ -171,14 +173,27 @@ func (e *SetLocationsExecution) ExecuteAsync(ctx context.Context) (*prov.Action,
 		return nil, 0, err
 	}
 
+	timeInterval := e.MonitoringTimeInterval
+	var cloudRequest string
+	if requestType == requestTypeCloud {
+		cloudRequest, err = e.getCloudRequest(ctx)
+		// For cloud locations request, the minimal monitoring time interval is 40 seconds
+		// to have a retry evey 40 seconds when no cloud location is available
+		minCloudTimeInterval := time.Second * 40
+		if timeInterval < minCloudTimeInterval {
+			timeInterval = minCloudTimeInterval
+		}
+	}
+
 	data := make(map[string]string)
 	data[actionDataTaskID] = e.TaskID
 	data[actionDataNodeName] = e.NodeName
 	data[actionDataRequestID] = requestID
 	data[actionDataRequestType] = requestType
+	data[actionDataCloudRequest] = cloudRequest
 	data[actionDataUserName] = e.User
 
-	return &prov.Action{ActionType: computeBestLocationAction, Data: data}, e.MonitoringTimeInterval, err
+	return &prov.Action{ActionType: computeBestLocationAction, Data: data}, timeInterval, err
 }
 
 // Execute executes a synchronous operation
@@ -364,6 +379,16 @@ func (e *SetLocationsExecution) submitComputeBestLocationRequest(ctx context.Con
 		}
 		requestID = submittedReq.RequestID
 		requestType = requestTypeCloud
+		// Store cloud requirements if the request needs to be resubmitted when no cloud location is available
+		v, err := json.Marshal(damCloudReq)
+		if err != nil {
+			return errors.Wrapf(err, "Failed to marshal %v", damCloudReq)
+		}
+		err = deployments.SetAttributeForAllInstances(ctx, e.DeploymentID, e.NodeName,
+			cloudRequestConsulAttribute, string(v))
+		if err != nil {
+			return errors.Wrapf(err, "Failed to store cloud requirement %v", damCloudReq)
+		}
 	} else {
 		reqVal, _ := json.Marshal(damHPCReq)
 		events.WithContextOptionalFields(ctx).NewLogEntry(events.LogLevelINFO, e.DeploymentID).Registerf(
@@ -416,6 +441,19 @@ func (e *SetLocationsExecution) getRequestType(ctx context.Context) (string, err
 	}
 
 	return val.RawString(), err
+}
+
+func (e *SetLocationsExecution) getCloudRequest(ctx context.Context) (string, error) {
+
+	found, val, err := consulutil.GetStringValue(path.Join(consulutil.DeploymentKVPrefix, e.DeploymentID, "topology/instances", e.NodeName, "0", "attributes", cloudRequestConsulAttribute))
+	if err != nil {
+		return "", errors.Wrap(err, consulutil.ConsulGenericErrMsg)
+	}
+	if !found || val == "" {
+		return "", errors.Errorf("Found no stored cloud request for deployment %s node %s", e.DeploymentID, e.NodeName)
+	}
+
+	return strconv.Unquote(val)
 }
 
 // ResolveExecution resolves inputs before the execution of an operation

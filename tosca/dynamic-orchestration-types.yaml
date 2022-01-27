@@ -2,14 +2,14 @@ tosca_definitions_version: yorc_tosca_simple_yaml_1_0
 
 metadata:
   template_name: org.lexis.common.dynamic-orchestration-types
-  template_version: 1.0.1
+  template_version: 1.0.3
   template_author: lexis
 
 description: Dynamic orchestration types
 
 imports:
-  - org.lexis.common.heappe-types:1.0.6
-  - org.lexis.common.ddi-types:1.0.1
+  - org.lexis.common.heappe-types:1.0.8
+  - org.lexis.common.ddi-types:1.0.3
 
 data_types:
   org.lexis.common.dynamic.orchestration.types.CloudRequirement:
